@@ -3,6 +3,11 @@ port = 5092
 threads = 8  # Optimized for 8 P-cores
 CHUNK_MINUTE = 1.5  # Target 90-second chunks with intelligent silence-based splitting
 
+# Reject requests whose converted WAV exceeds this duration (seconds). Guards
+# against malformed inputs that ffmpeg turns into unexpectedly long audio and
+# would otherwise push the process past its memory budget.
+MAX_AUDIO_DURATION_SECONDS = 120.0
+
 # Intelligent chunking configuration
 SILENCE_THRESHOLD = "-40dB"  # Silence detection threshold
 SILENCE_MIN_DURATION = 0.5  # Minimum silence duration in seconds
@@ -578,6 +583,17 @@ def transcribe_audio():
         total_duration = get_audio_duration(target_wav_path)
         if total_duration == 0:
             return jsonify({"error": "Cannot process audio with 0 duration"}), 400
+        if total_duration > MAX_AUDIO_DURATION_SECONDS:
+            print(
+                f"[{unique_id}] Rejecting: converted audio duration "
+                f"{total_duration:.2f}s exceeds MAX_AUDIO_DURATION_SECONDS="
+                f"{MAX_AUDIO_DURATION_SECONDS}s"
+            )
+            return jsonify({
+                "error": "Audio too long after conversion",
+                "duration_seconds": round(total_duration, 2),
+                "max_duration_seconds": MAX_AUDIO_DURATION_SECONDS,
+            }), 413
 
         # Use intelligent chunking based on silence detection
         chunk_paths = []
