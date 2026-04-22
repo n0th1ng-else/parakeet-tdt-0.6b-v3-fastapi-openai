@@ -3,11 +3,6 @@ port = 5092
 threads = 8  # Optimized for 8 P-cores
 CHUNK_MINUTE = 1.5  # Target 90-second chunks with intelligent silence-based splitting
 
-# Reject requests whose converted WAV exceeds this duration (seconds). Guards
-# against malformed inputs that ffmpeg turns into unexpectedly long audio and
-# would otherwise push the process past its memory budget.
-MAX_AUDIO_DURATION_SECONDS = 120.0
-
 # Intelligent chunking configuration
 SILENCE_THRESHOLD = "-40dB"  # Silence detection threshold
 SILENCE_MIN_DURATION = 0.5  # Minimum silence duration in seconds
@@ -39,6 +34,12 @@ os.environ["HF_HUB_CACHE"] = ROOT_DIR + "/models"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "true"
 if sys.platform == "win32":
     os.environ["PATH"] = ROOT_DIR + f";{ROOT_DIR}/ffmpeg;" + os.environ["PATH"]
+
+# Reject requests whose audio exceeds this duration (seconds). Guards
+# against malformed inputs that ffmpeg turns into unexpectedly long WAVs
+# and would otherwise push the process past its memory budget. Override
+# via the MAX_AUDIO_DURATION_SECONDS env var.
+MAX_AUDIO_DURATION_SECONDS = float(os.environ.get("MAX_AUDIO_DURATION_SECONDS", 120.0))
 
 
 # Model configurations for different precision variants
@@ -852,6 +853,7 @@ if __name__ == "__main__":
     print(f"Web interface: http://127.0.0.1:{port}")
     print(f"API Endpoint: POST http://{host}:{port}/v1/audio/transcriptions")
     print(f"Running with {threads} threads.")
+    print(f"Max audio duration: {MAX_AUDIO_DURATION_SECONDS}s")
     print(f"Starting web browser thread...")
     threading.Thread(target=openweb).start()
     print(f"Starting waitress server...")
