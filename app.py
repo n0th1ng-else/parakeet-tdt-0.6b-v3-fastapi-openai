@@ -556,6 +556,22 @@ def transcribe_audio():
         file.save(temp_original_path)
         temp_files_to_clean.append(temp_original_path)
 
+        # Pre-convert duration gate: cheap rejection for honest long files
+        # before we spend a full decode. The post-convert check still runs to
+        # catch containers that under-report duration vs. what ffmpeg decodes.
+        source_duration = get_audio_duration(temp_original_path)
+        if source_duration > MAX_AUDIO_DURATION_SECONDS:
+            print(
+                f"[{unique_id}] Rejecting: source audio duration "
+                f"{source_duration:.2f}s exceeds MAX_AUDIO_DURATION_SECONDS="
+                f"{MAX_AUDIO_DURATION_SECONDS}s"
+            )
+            return jsonify({
+                "error": "Audio too long",
+                "duration_seconds": round(source_duration, 2),
+                "max_duration_seconds": MAX_AUDIO_DURATION_SECONDS,
+            }), 413
+
         print(
             f"[{unique_id}] Converting '{original_filename}' to standard WAV format..."
         )
