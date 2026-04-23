@@ -19,33 +19,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-
-  # GPU deployment (requires NVIDIA Container Toolkit)
-  parakeet-gpu:
-    build:
-      context: .
-      dockerfile: Dockerfile.gpu
-    image: parakeet-tdt:gpu
-    container_name: parakeet-gpu
-    ports:
-      - "5092:5092"
-    volumes:
-      - parakeet-models:/app/models
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
-    healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5092/health')" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
-
+    environment:
+      - MAX_AUDIO_DURATION_SECONDS=120
 volumes:
   parakeet-models:
     name: parakeet-models
