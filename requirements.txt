@@ -6,7 +6,7 @@ typing_extensions>=4.0.0
 psutil>=5.0.0
 requests>=2.0.0
 onnxruntime>=1.18.1
-numpy<2
+numpy
 
 # Optional GPU support (uncomment if you have NVIDIA GPU)
 # onnxruntime-gpu>=1.18.1

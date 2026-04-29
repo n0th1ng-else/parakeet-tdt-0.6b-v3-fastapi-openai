@@ -1,7 +1,7 @@
 # Parakeet TDT 0.6B ONNX - GPU Dockerfile
 # High-performance speech transcription with NVIDIA CUDA
 
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 LABEL maintainer="Parakeet TDT"
 LABEL description="ONNX-optimized speech transcription service (GPU/CUDA)"
@@ -9,16 +9,35 @@ LABEL description="ONNX-optimized speech transcription service (GPU/CUDA)"
 # Prevent interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies and Python 3.10
+# Install system dependencies and Python 3.13 from deadsnakes PPA
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3.10-venv \
-    python3-pip \
-    ffmpeg \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.13 \
+    python3.13-venv \
+    python3.13-dev \
+    wget \
+    xz-utils \
+    && ln -sf /usr/bin/python3.13 /usr/bin/python \
+    && ln -sf /usr/bin/python3.13 /usr/bin/python3 \
+    && python -m ensurepip --upgrade \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# Install FFmpeg 8.1 release build from BtbN/FFmpeg-Builds
+ARG TARGETARCH
+RUN if [ "${TARGETARCH}" = "arm64" ]; then ARCH=linuxarm64; else ARCH=linux64; fi \
+    && ASSET_URL=$(wget -qO- https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest \
+       | grep -o "https://[^\"]*ffmpeg-n8\.1[^\"]*-${ARCH}-lgpl-8\.1\.tar\.xz" | head -1) \
+    && wget -q "${ASSET_URL}" -O /tmp/ffmpeg.tar.xz \
+    && mkdir -p /tmp/ffmpeg && tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1 \
+    && cp /tmp/ffmpeg/bin/ffmpeg /usr/local/bin/ \
+    && cp /tmp/ffmpeg/bin/ffprobe /usr/local/bin/ \
+    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ffmpeg* \
+    && apt-get purge -y wget xz-utils && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* && apt-get clean
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash parakeet
@@ -38,7 +57,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     psutil>=5.0.0 \
     requests>=2.0.0 \
     onnxruntime-gpu>=1.18.1 \
-    "numpy<2"
+    numpy
 
 # Copy application code
 COPY app.py .

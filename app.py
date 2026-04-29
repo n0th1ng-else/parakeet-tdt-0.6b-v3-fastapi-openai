@@ -65,6 +65,12 @@ MODEL_CONFIGS = {
 model_cache = {}
 
 try:
+    _ffmpeg_ver = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+    print(f"FFmpeg: {_ffmpeg_ver.stdout.splitlines()[0] if _ffmpeg_ver.returncode == 0 else 'not found'}")
+except Exception:
+    print("FFmpeg: not found")
+
+try:
     print("\nInitializing ONNX Runtime...")
     import onnx_asr
     import onnxruntime as ort
