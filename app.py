@@ -597,6 +597,8 @@ def transcribe_audio():
         result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"FFmpeg error: {result.stderr}")
+            if "Output file does not contain any stream" in result.stderr:
+                return jsonify({"error": "The provided file contains no audio stream to transcribe."}), 400
             return jsonify(
                 {"error": "File conversion failed", "details": result.stderr}
             ), 500
