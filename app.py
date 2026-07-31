@@ -44,6 +44,14 @@ MAX_AUDIO_DURATION_SECONDS = float(os.environ.get("MAX_AUDIO_DURATION_SECONDS", 
 
 # PoC backend tuning (transformers-based models)
 HF_MAX_NEW_TOKENS = int(os.environ.get("HF_MAX_NEW_TOKENS", 512))
+# Ceiling for MOSS output; generous in case a custom MOSS_PROMPT re-enables
+# the token-heavy timestamp/speaker tags.
+MOSS_MAX_NEW_TOKENS = int(os.environ.get("MOSS_MAX_NEW_TOKENS", 2048))
+# Instruction prompt for MOSS. Official recipes (with diarization/timestamps/
+# hotwords) live in examples/prompts.md of the MOSS repo; the plain-text
+# default below is a slight extrapolation of their "speaker-only" recipe that
+# skips the tag tokens entirely, since this API only returns plain text.
+MOSS_PROMPT = os.environ.get("MOSS_PROMPT", "Transcribe the audio as text.")
 VOXTRAL_LANGUAGE = os.environ.get("VOXTRAL_LANGUAGE", "en")
 # fp32 is usually faster than emulated bf16 on CPU; set to bfloat16 to halve RAM.
 VOXTRAL_DTYPE = os.environ.get("VOXTRAL_DTYPE", "float32")
@@ -87,6 +95,11 @@ MODEL_CONFIGS = {
         "backend": "voxtral",
         "hf_id": "mistralai/Voxtral-Mini-3B-2507",
         "description": "Voxtral Mini 3B (transformers, CPU)"
+    },
+    "moss-transcribe-diarize": {
+        "backend": "moss",
+        "hf_id": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        "description": "MOSS-Transcribe-Diarize 0.9B (transformers, diarization, CPU)"
     },
 }
 
@@ -176,10 +189,10 @@ def _configure_torch_threads():
     _torch_threads_configured = True
 
 
-# Qwen3-ASR expects full language names ("German"), while the API takes
-# OpenAI-style ISO-639-1 codes ("de"). Unmapped values pass through as-is,
-# so sending a language name directly also works.
-QWEN3_LANGUAGE_NAMES = {
+# Qwen3-ASR and the MOSS prompt expect full language names ("German"), while
+# the API takes OpenAI-style ISO-639-1 codes ("de"). Unmapped values pass
+# through as-is, so sending a language name directly also works.
+ISO_LANGUAGE_NAMES = {
     "en": "English", "zh": "Chinese", "de": "German", "fr": "French",
     "es": "Spanish", "it": "Italian", "pt": "Portuguese", "ru": "Russian",
     "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "nl": "Dutch",
@@ -209,7 +222,7 @@ class Qwen3ASRTranscriber:
         # language=None lets the model auto-detect (it covers ~52 languages)
         kwargs = {}
         if language:
-            kwargs["language"] = QWEN3_LANGUAGE_NAMES.get(language.lower(), language)
+            kwargs["language"] = ISO_LANGUAGE_NAMES.get(language.lower(), language)
         inputs = self.processor.apply_transcription_request(audio=wav_path, **kwargs)
         inputs = inputs.to(self.model.device, self.model.dtype)
         with self._lock, self.torch.inference_mode():
@@ -287,6 +300,54 @@ class VoxtralTranscriber:
         return HFTranscription((text or "").strip())
 
 
+class MossTranscriber:
+    """OpenMOSS MOSS-Transcribe-Diarize 0.9B (transformers, remote code).
+
+    The instruction prompt controls the output shape (see MOSS_PROMPT); the
+    default asks for plain text so no timestamp/speaker tokens are generated.
+    A requested language is appended to the prompt as a hint, and any [tag]
+    markers the model still emits are stripped so `text` stays plain."""
+
+    def __init__(self, hf_id):
+        import torch
+        from transformers import AutoModelForCausalLM, AutoProcessor
+
+        _configure_torch_threads()
+        self.torch = torch
+        self.model = AutoModelForCausalLM.from_pretrained(
+            hf_id, trust_remote_code=True, dtype=torch.float32
+        ).eval()
+        self.processor = AutoProcessor.from_pretrained(hf_id, trust_remote_code=True)
+        self._lock = threading.Lock()
+
+    def recognize(self, wav_path, language=None):
+        from moss_transcribe_diarize.inference_utils import (
+            build_transcription_messages,
+            generate_transcription,
+        )
+
+        prompt = MOSS_PROMPT
+        if language:
+            # Prompt hint, not a hard constraint — the model auto-detects
+            # among 50+ languages and may override it.
+            name = ISO_LANGUAGE_NAMES.get(language.lower(), language)
+            prompt = f"{prompt} The spoken language is {name}."
+
+        messages = build_transcription_messages(wav_path, prompt=prompt)
+        with self._lock:
+            result = generate_transcription(
+                self.model,
+                self.processor,
+                messages,
+                max_new_tokens=MOSS_MAX_NEW_TOKENS,
+                do_sample=False,
+            )
+        # Drop any [timestamp]/[Sxx] markers (present when MOSS_PROMPT is set
+        # back to one of the official diarization recipes)
+        text = re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]", " ", result["text"])).strip()
+        return HFTranscription(text)
+
+
 def _load_onnx_asr_model(config):
     """Load a Parakeet ONNX variant with the CPU-tuned session options."""
     import onnxruntime as ort
@@ -356,6 +417,8 @@ def get_model(model_name):
                 language=VOXTRAL_LANGUAGE,
                 dtype_name=VOXTRAL_DTYPE,
             )
+        elif backend == "moss":
+            model = MossTranscriber(config["hf_id"])
         else:
             raise ValueError(f"Unknown backend '{backend}' for model {model_name}")
 
@@ -646,7 +709,7 @@ def openapi_spec():
                                         "language": {
                                             "type": "string",
                                             "example": "de",
-                                            "description": "Optional ISO-639-1 language code (e.g. 'en', 'de', 'fr'), same format as OpenAI's API. Omit for auto-detection. Honored by qwen3-asr-0.6b and voxtral-mini; Parakeet models always auto-detect and moonshine-v2 uses the language it was loaded with (MOONSHINE_LANGUAGE)."
+                                            "description": "Optional ISO-639-1 language code (e.g. 'en', 'de', 'fr'), same format as OpenAI's API. Omit for auto-detection. Honored by qwen3-asr-0.6b and voxtral-mini, and used as a prompt hint by moss-transcribe-diarize; Parakeet models always auto-detect and moonshine-v2 uses the language it was loaded with (MOONSHINE_LANGUAGE)."
                                         },
                                         "response_format": {
                                             "type": "string",

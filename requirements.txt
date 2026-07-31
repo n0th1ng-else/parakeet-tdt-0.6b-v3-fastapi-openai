@@ -17,6 +17,8 @@ librosa>=0.10.0         # audio loading for the Qwen3 processor
 soundfile>=0.12.0
 mistral-common[audio]>=1.8.1  # Voxtral tokenizer/audio handling
 moonshine-voice>=0.1.0  # Moonshine v2 (bundles its own ONNX runtime)
+# MOSS-Transcribe-Diarize helper package (not on PyPI; pinned to main @ 2026-07-24)
+moss-transcribe-diarize @ https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/archive/0e3d1403fd8f1f1c674e883ece96b9f630794ebe.tar.gz
 
 # Optional GPU support (uncomment if you have NVIDIA GPU)
 # onnxruntime-gpu>=1.18.1

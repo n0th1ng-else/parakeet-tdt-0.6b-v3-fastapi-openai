@@ -228,6 +228,7 @@ Besides the Parakeet variants, the server registers additional models for CPU pe
 | `qwen3-asr-0.6b` | transformers (`Qwen/Qwen3-ASR-0.6B-hf`) | fp32 on CPU; requires `transformers>=5.13` |
 | `moonshine-v2` | `moonshine-voice` (ONNX) | Arch/language via `MOONSHINE_MODEL_ARCH` / `MOONSHINE_LANGUAGE` |
 | `voxtral-mini` | transformers (`mistralai/Voxtral-Mini-3B-2507`) | fp32 on CPU (~12 GB RAM); `VOXTRAL_DTYPE=bfloat16` halves RAM |
+| `moss-transcribe-diarize` | transformers (`OpenMOSS-Team/MOSS-Transcribe-Diarize`, 0.9B) | runs remote code from the HF repo (`trust_remote_code`); prompted for plain text by default — set `MOSS_PROMPT` to an [official recipe](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/blob/main/examples/prompts.md) to re-enable diarization/timestamps (tags are stripped from `text` either way); `MOSS_MAX_NEW_TOKENS` (default 2048) |
 
 Tuning env vars: `HF_MAX_NEW_TOKENS` (default 512), `TORCH_NUM_THREADS` (default: physical cores), `VOXTRAL_LANGUAGE` (default `en`).
 
@@ -241,6 +242,7 @@ The endpoint accepts an optional `language` form field with an **ISO-639-1 code*
 | `voxtral-mini` | ✅ required by the model; defaults to `VOXTRAL_LANGUAGE` (`en`) when omitted |
 | Parakeet variants | ignored — the model always auto-detects (25 European languages) |
 | `moonshine-v2` | ignored per-request — set `MOONSHINE_LANGUAGE` before startup instead |
+| `moss-transcribe-diarize` | ✅ appended to the instruction prompt as a hint (experimental — the model auto-detects and may override it) |
 
 Example:
 
