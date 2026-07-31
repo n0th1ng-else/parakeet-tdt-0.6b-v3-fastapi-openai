@@ -8,5 +8,15 @@ requests>=2.0.0
 onnxruntime>=1.18.1
 numpy
 
+# --- PoC ASR backends (Qwen3-ASR, Moonshine v2, Voxtral) ---
+# CPU-only torch wheels (avoids pulling multi-GB CUDA dependencies)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.6.0
+transformers>=5.13.0    # Qwen3-ASR-hf requires >=5.13
+librosa>=0.10.0         # audio loading for the Qwen3 processor
+soundfile>=0.12.0
+mistral-common[audio]>=1.8.1  # Voxtral tokenizer/audio handling
+moonshine-voice>=0.1.0  # Moonshine v2 (bundles its own ONNX runtime)
+
 # Optional GPU support (uncomment if you have NVIDIA GPU)
 # onnxruntime-gpu>=1.18.1

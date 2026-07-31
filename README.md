@@ -219,6 +219,25 @@ The web interface includes a dropdown menu to select between INT8, FP16, and FP3
 
 When running the application, the ONNX models are automatically loaded from the `models/` directory. The primary model used is the **Parakeet TDT 0.6B v3** converted to ONNX with INT8 quantization, providing the optimal balance of speed and accuracy for multilingual speech recognition across 25 European languages.
 
+## 🧪 PoC models (CPU benchmark)
+
+Besides the Parakeet variants, the server registers additional models for CPU performance comparison. Each is downloaded and loaded lazily on the first request that selects it (pass the name in the `model` form field):
+
+| `model` value | Backend | Notes |
+|---|---|---|
+| `qwen3-asr-0.6b` | transformers (`Qwen/Qwen3-ASR-0.6B-hf`) | fp32 on CPU; requires `transformers>=5.13` |
+| `moonshine-v2` | `moonshine-voice` (ONNX) | Arch/language via `MOONSHINE_MODEL_ARCH` / `MOONSHINE_LANGUAGE` |
+| `voxtral-mini` | transformers (`mistralai/Voxtral-Mini-3B-2507`) | fp32 on CPU (~12 GB RAM); `VOXTRAL_DTYPE=bfloat16` halves RAM |
+
+Tuning env vars: `HF_MAX_NEW_TOKENS` (default 512), `TORCH_NUM_THREADS` (default: physical cores), `VOXTRAL_LANGUAGE` (default `en`).
+
+Example:
+
+```bash
+curl -s http://localhost:5092/v1/audio/transcriptions \
+  -F file=@sample.wav -F model=qwen3-asr-0.6b | jq .text
+```
+
 ## 🙏 Acknowledgments
 
 This project stands on the shoulders of giants and wouldn't be possible without:

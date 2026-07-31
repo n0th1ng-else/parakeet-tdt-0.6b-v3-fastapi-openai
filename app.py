@@ -42,22 +42,51 @@ if sys.platform == "win32":
 MAX_AUDIO_DURATION_SECONDS = float(os.environ.get("MAX_AUDIO_DURATION_SECONDS", 120.0))
 
 
-# Model configurations for different precision variants
+# PoC backend tuning (transformers-based models)
+HF_MAX_NEW_TOKENS = int(os.environ.get("HF_MAX_NEW_TOKENS", 512))
+VOXTRAL_LANGUAGE = os.environ.get("VOXTRAL_LANGUAGE", "en")
+# fp32 is usually faster than emulated bf16 on CPU; set to bfloat16 to halve RAM.
+VOXTRAL_DTYPE = os.environ.get("VOXTRAL_DTYPE", "float32")
+MOONSHINE_LANGUAGE = os.environ.get("MOONSHINE_LANGUAGE", "en")
+# e.g. "tiny-streaming", "small-streaming", "medium-streaming"; empty = library default
+MOONSHINE_MODEL_ARCH = os.environ.get("MOONSHINE_MODEL_ARCH", "")
+
+# Model configurations. backend "onnx_asr" is the original Parakeet path;
+# the other backends are PoC additions loaded lazily on first request.
 MODEL_CONFIGS = {
     "parakeet-tdt-0.6b-v3": {
+        "backend": "onnx_asr",
         "hf_id": "nemo-parakeet-tdt-0.6b-v3",
         "quantization": "int8",
         "description": "INT8 (fastest)"
     },
     "istupakov/parakeet-tdt-0.6b-v3-onnx": {
+        "backend": "onnx_asr",
         "hf_id": "istupakov/parakeet-tdt-0.6b-v3-onnx",
         "quantization": None,
         "description": "FP32"
     },
     "grikdotnet/parakeet-tdt-0.6b-fp16": {
+        "backend": "onnx_asr",
         "hf_id": "grikdotnet/parakeet-tdt-0.6b-fp16",
         "quantization": "fp16",
         "description": "FP16"
+    },
+    "qwen3-asr-0.6b": {
+        "backend": "qwen3",
+        "hf_id": "Qwen/Qwen3-ASR-0.6B-hf",
+        "description": "Qwen3-ASR 0.6B (transformers, fp32 CPU)"
+    },
+    "moonshine-v2": {
+        "backend": "moonshine",
+        "language": MOONSHINE_LANGUAGE,
+        "model_arch": MOONSHINE_MODEL_ARCH or None,
+        "description": "Moonshine v2 (ONNX, CPU)"
+    },
+    "voxtral-mini": {
+        "backend": "voxtral",
+        "hf_id": "mistralai/Voxtral-Mini-3B-2507",
+        "description": "Voxtral Mini 3B (transformers, CPU)"
     },
 }
 
@@ -120,13 +149,150 @@ except Exception as e:
 print("=" * 50)
 
 
+class HFTranscription:
+    """Duck-types the onnx_asr recognize() result (text/tokens/timestamps)
+    so the PoC backends plug into the existing chunk pipeline unchanged."""
+
+    def __init__(self, text, timestamps=None, tokens=None):
+        self.text = text
+        self.timestamps = timestamps or []
+        self.tokens = tokens or []
+
+
+_torch_threads_configured = False
+
+
+def _configure_torch_threads():
+    """Pin torch to physical cores once; override via TORCH_NUM_THREADS."""
+    global _torch_threads_configured
+    if _torch_threads_configured:
+        return
+    import torch
+    n = int(os.environ.get("TORCH_NUM_THREADS", 0)) or (
+        psutil.cpu_count(logical=False) or os.cpu_count() or 4
+    )
+    torch.set_num_threads(n)
+    print(f"torch threads: {n}")
+    _torch_threads_configured = True
+
+
+class Qwen3ASRTranscriber:
+    """Qwen/Qwen3-ASR-0.6B-hf via transformers (requires transformers>=5.13)."""
+
+    def __init__(self, hf_id):
+        import torch
+        from transformers import AutoProcessor, AutoModelForMultimodalLM
+
+        _configure_torch_threads()
+        self.torch = torch
+        self.processor = AutoProcessor.from_pretrained(hf_id)
+        self.model = AutoModelForMultimodalLM.from_pretrained(hf_id, dtype=torch.float32)
+        self.model.eval()
+        # Serialize inference: a single generate() already saturates the CPU
+        self._lock = threading.Lock()
+
+    def recognize(self, wav_path):
+        inputs = self.processor.apply_transcription_request(audio=wav_path)
+        inputs = inputs.to(self.model.device, self.model.dtype)
+        with self._lock, self.torch.inference_mode():
+            output_ids = self.model.generate(**inputs, max_new_tokens=HF_MAX_NEW_TOKENS)
+        generated_ids = output_ids[:, inputs["input_ids"].shape[1]:]
+        text = self.processor.decode(generated_ids, return_format="transcription_only")[0]
+        return HFTranscription((text or "").strip())
+
+
+class MoonshineV2Transcriber:
+    """Moonshine v2 via the moonshine-voice package (ONNX runtime, CPU)."""
+
+    def __init__(self, language="en", model_arch=None):
+        from moonshine_voice import Transcriber, get_model_for_language, string_to_model_arch
+
+        arch = string_to_model_arch(model_arch) if model_arch else None
+        model_path, resolved_arch = get_model_for_language(language, arch)
+        print(f"Moonshine model: {model_path} (arch={resolved_arch.name})")
+        self.transcriber = Transcriber(model_path=model_path, model_arch=resolved_arch)
+        # The ctypes handle is not documented as thread-safe
+        self._lock = threading.Lock()
+
+    def recognize(self, wav_path):
+        from moonshine_voice import load_wav_file
+
+        audio_data, sample_rate = load_wav_file(wav_path)
+        with self._lock:
+            transcript = self.transcriber.transcribe_without_streaming(audio_data, sample_rate)
+        lines = [ln for ln in transcript.lines if ln.text and ln.text.strip()]
+        text = " ".join(ln.text.strip() for ln in lines)
+        timestamps = []
+        if lines:
+            timestamps = [lines[0].start_time, lines[-1].start_time + lines[-1].duration]
+        return HFTranscription(text, timestamps=timestamps)
+
+
+class VoxtralTranscriber:
+    """Voxtral via transformers in dedicated transcription mode."""
+
+    def __init__(self, hf_id, language="en", dtype_name="bfloat16"):
+        import torch
+        from transformers import AutoProcessor, VoxtralForConditionalGeneration
+
+        _configure_torch_threads()
+        self.torch = torch
+        self.hf_id = hf_id
+        self.language = language
+        self.dtype = getattr(torch, dtype_name)
+        self.processor = AutoProcessor.from_pretrained(hf_id)
+        self.model = VoxtralForConditionalGeneration.from_pretrained(hf_id, dtype=self.dtype)
+        self.model.eval()
+        self._lock = threading.Lock()
+
+    def recognize(self, wav_path):
+        inputs = self.processor.apply_transcription_request(
+            language=self.language, audio=wav_path, model_id=self.hf_id
+        )
+        inputs = inputs.to(self.model.device, dtype=self.dtype)
+        with self._lock, self.torch.inference_mode():
+            outputs = self.model.generate(**inputs, max_new_tokens=HF_MAX_NEW_TOKENS)
+        text = self.processor.batch_decode(
+            outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True
+        )[0]
+        return HFTranscription((text or "").strip())
+
+
+def _load_onnx_asr_model(config):
+    """Load a Parakeet ONNX variant with the CPU-tuned session options."""
+    import onnxruntime as ort
+
+    # Reuse providers from startup
+    available_providers = ort.get_available_providers()
+    providers_to_try = []
+    if "TensorrtExecutionProvider" in available_providers:
+        providers_to_try.append("TensorrtExecutionProvider")
+    if "CUDAExecutionProvider" in available_providers:
+        providers_to_try.append("CUDAExecutionProvider")
+    providers_to_try.append("CPUExecutionProvider")
+
+    # Configure session options
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 4
+    sess_options.inter_op_num_threads = 1
+    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    return onnx_asr.load_model(
+        config["hf_id"],
+        quantization=config["quantization"],
+        providers=providers_to_try,
+        sess_options=sess_options,
+    ).with_timestamps()
+
+
 def get_model(model_name):
     """
     Get or load a model by name with lazy loading and caching.
-    
+
     Args:
         model_name: Name of the model (key in MODEL_CONFIGS)
-        
+
     Returns:
         Loaded ASR model instance
     """
@@ -134,58 +300,48 @@ def get_model(model_name):
     if model_name not in MODEL_CONFIGS:
         print(f"⚠️ Unknown model '{model_name}', falling back to default INT8 model")
         model_name = "parakeet-tdt-0.6b-v3"
-    
+
     # Return cached model if available
     if model_name in model_cache:
         print(f"Using cached model: {model_name}")
         return model_cache[model_name]
-    
+
     # Load new model
     print(f"Loading model: {model_name}")
     config = MODEL_CONFIGS[model_name]
-    
+    backend = config.get("backend", "onnx_asr")
+
     try:
-        import onnxruntime as ort
-        
-        # Reuse providers from startup
-        available_providers = ort.get_available_providers()
-        providers_to_try = []
-        if "TensorrtExecutionProvider" in available_providers:
-            providers_to_try.append("TensorrtExecutionProvider")
-        if "CUDAExecutionProvider" in available_providers:
-            providers_to_try.append("CUDAExecutionProvider")
-        providers_to_try.append("CPUExecutionProvider")
-        
-        # Configure session options
-        sess_options = ort.SessionOptions()
-        sess_options.intra_op_num_threads = 4
-        sess_options.inter_op_num_threads = 1
-        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        
-        model = onnx_asr.load_model(
-            config["hf_id"],
-            quantization=config["quantization"],
-            providers=providers_to_try,
-            sess_options=sess_options,
-        ).with_timestamps()
-        
+        if backend == "onnx_asr":
+            model = _load_onnx_asr_model(config)
+        elif backend == "qwen3":
+            model = Qwen3ASRTranscriber(config["hf_id"])
+        elif backend == "moonshine":
+            model = MoonshineV2Transcriber(
+                language=config.get("language", "en"),
+                model_arch=config.get("model_arch"),
+            )
+        elif backend == "voxtral":
+            model = VoxtralTranscriber(
+                config["hf_id"],
+                language=VOXTRAL_LANGUAGE,
+                dtype_name=VOXTRAL_DTYPE,
+            )
+        else:
+            raise ValueError(f"Unknown backend '{backend}' for model {model_name}")
+
         # Cache the loaded model
         model_cache[model_name] = model
         print(f"Model {model_name} loaded successfully")
-        
+
         return model
     except Exception as e:
         print(f"❌ Failed to load model {model_name}: {e}")
         import traceback
         traceback.print_exc()
-        # Try to return the default cached model if available
-        if "parakeet-tdt-0.6b-v3" in model_cache:
-            print(f"⚠️ Falling back to cached default model")
-            return model_cache["parakeet-tdt-0.6b-v3"]
-        else:
-            # If we can't even get the default, we have a serious problem
-            raise RuntimeError(f"Failed to load model {model_name} and no fallback available")
+        # No silent fallback: substituting another model would make the
+        # benchmark results lie about which model produced them.
+        raise RuntimeError(f"Failed to load model {model_name}: {e}")
 
 
 app = Flask(__name__)
@@ -453,8 +609,10 @@ def openapi_spec():
                                         "model": {
                                             "type": "string",
                                             "default": "parakeet-tdt-0.6b-v3",
-                                            "enum": ["parakeet-tdt-0.6b-v3", "istupakov/parakeet-tdt-0.6b-v3-onnx", "grikdotnet/parakeet-tdt-0.6b-fp16"],
-                                            "description": "Model variant to use: parakeet-tdt-0.6b-v3 (INT8, fastest), istupakov/parakeet-tdt-0.6b-v3-onnx (FP32), or grikdotnet/parakeet-tdt-0.6b-fp16 (FP16)"
+                                            "enum": list(MODEL_CONFIGS.keys()),
+                                            "description": "Model to use: " + "; ".join(
+                                                f"{name} ({cfg['description']})" for name, cfg in MODEL_CONFIGS.items()
+                                            )
                                         },
                                         "response_format": {
                                             "type": "string",
