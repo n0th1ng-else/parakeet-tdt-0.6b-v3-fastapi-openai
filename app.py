@@ -176,6 +176,20 @@ def _configure_torch_threads():
     _torch_threads_configured = True
 
 
+# Qwen3-ASR expects full language names ("German"), while the API takes
+# OpenAI-style ISO-639-1 codes ("de"). Unmapped values pass through as-is,
+# so sending a language name directly also works.
+QWEN3_LANGUAGE_NAMES = {
+    "en": "English", "zh": "Chinese", "de": "German", "fr": "French",
+    "es": "Spanish", "it": "Italian", "pt": "Portuguese", "ru": "Russian",
+    "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "nl": "Dutch",
+    "tr": "Turkish", "pl": "Polish", "uk": "Ukrainian", "cs": "Czech",
+    "sv": "Swedish", "da": "Danish", "fi": "Finnish", "no": "Norwegian",
+    "hi": "Hindi", "id": "Indonesian", "vi": "Vietnamese", "th": "Thai",
+    "el": "Greek", "ro": "Romanian", "hu": "Hungarian", "bg": "Bulgarian",
+}
+
+
 class Qwen3ASRTranscriber:
     """Qwen/Qwen3-ASR-0.6B-hf via transformers (requires transformers>=5.13)."""
 
@@ -191,8 +205,12 @@ class Qwen3ASRTranscriber:
         # Serialize inference: a single generate() already saturates the CPU
         self._lock = threading.Lock()
 
-    def recognize(self, wav_path):
-        inputs = self.processor.apply_transcription_request(audio=wav_path)
+    def recognize(self, wav_path, language=None):
+        # language=None lets the model auto-detect (it covers ~52 languages)
+        kwargs = {}
+        if language:
+            kwargs["language"] = QWEN3_LANGUAGE_NAMES.get(language.lower(), language)
+        inputs = self.processor.apply_transcription_request(audio=wav_path, **kwargs)
         inputs = inputs.to(self.model.device, self.model.dtype)
         with self._lock, self.torch.inference_mode():
             output_ids = self.model.generate(**inputs, max_new_tokens=HF_MAX_NEW_TOKENS)
@@ -210,12 +228,20 @@ class MoonshineV2Transcriber:
         arch = string_to_model_arch(model_arch) if model_arch else None
         model_path, resolved_arch = get_model_for_language(language, arch)
         print(f"Moonshine model: {model_path} (arch={resolved_arch.name})")
+        self.language = language
         self.transcriber = Transcriber(model_path=model_path, model_arch=resolved_arch)
         # The ctypes handle is not documented as thread-safe
         self._lock = threading.Lock()
 
-    def recognize(self, wav_path):
+    def recognize(self, wav_path, language=None):
         from moonshine_voice import load_wav_file
+
+        # Moonshine picks its language at model-download time, not per request
+        if language and language.lower() != self.language:
+            print(
+                f"⚠️ moonshine-v2 was loaded for '{self.language}'; ignoring "
+                f"requested language '{language}' (set MOONSHINE_LANGUAGE and restart)"
+            )
 
         audio_data, sample_rate = load_wav_file(wav_path)
         with self._lock:
@@ -245,9 +271,12 @@ class VoxtralTranscriber:
         self.model.eval()
         self._lock = threading.Lock()
 
-    def recognize(self, wav_path):
+    def recognize(self, wav_path, language=None):
+        # Voxtral's transcription API requires an explicit ISO-639-1 code
         inputs = self.processor.apply_transcription_request(
-            language=self.language, audio=wav_path, model_id=self.hf_id
+            language=(language or self.language).lower(),
+            audio=wav_path,
+            model_id=self.hf_id,
         )
         inputs = inputs.to(self.model.device, dtype=self.dtype)
         with self._lock, self.torch.inference_mode():
@@ -614,6 +643,11 @@ def openapi_spec():
                                                 f"{name} ({cfg['description']})" for name, cfg in MODEL_CONFIGS.items()
                                             )
                                         },
+                                        "language": {
+                                            "type": "string",
+                                            "example": "de",
+                                            "description": "Optional ISO-639-1 language code (e.g. 'en', 'de', 'fr'), same format as OpenAI's API. Omit for auto-detection. Honored by qwen3-asr-0.6b and voxtral-mini; Parakeet models always auto-detect and moonshine-v2 uses the language it was loaded with (MOONSHINE_LANGUAGE)."
+                                        },
                                         "response_format": {
                                             "type": "string",
                                             "default": "json",
@@ -691,8 +725,9 @@ def transcribe_audio():
     # OpenAI compatible parameters
     model_name = request.form.get("model", "parakeet-tdt-0.6b-v3").lower()
     response_format = request.form.get("response_format", "json")
+    language = (request.form.get("language") or "").strip() or None
 
-    print(f"Request Model: {model_name} | Format: {response_format}")
+    print(f"Request Model: {model_name} | Format: {response_format} | Language: {language or 'auto'}")
     
     # Validate model and warn if unknown
     original_model_name = model_name
@@ -702,6 +737,11 @@ def transcribe_audio():
     
     # Get the appropriate model (with lazy loading)
     model_to_use = get_model(model_name)
+
+    # Only the PoC backends take a per-request language
+    forward_language = bool(language) and MODEL_CONFIGS[model_name].get("backend", "onnx_asr") != "onnx_asr"
+    if language and not forward_language:
+        print(f"⚠️ Model '{model_name}' auto-detects language; ignoring language='{language}'")
 
     # Legacy support
     if model_name == "parakeet_srt_words":
@@ -889,7 +929,10 @@ def transcribe_audio():
             })
             print(f"[{unique_id}] Transcribing chunk {i + 1}/{num_chunks}...")
 
-            result = model_to_use.recognize(chunk_path)
+            if forward_language:
+                result = model_to_use.recognize(chunk_path, language=language)
+            else:
+                result = model_to_use.recognize(chunk_path)
 
             if result and result.text:
                 start_time = result.timestamps[0] if result.timestamps else 0

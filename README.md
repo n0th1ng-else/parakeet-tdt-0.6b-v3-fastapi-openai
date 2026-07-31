@@ -231,11 +231,22 @@ Besides the Parakeet variants, the server registers additional models for CPU pe
 
 Tuning env vars: `HF_MAX_NEW_TOKENS` (default 512), `TORCH_NUM_THREADS` (default: physical cores), `VOXTRAL_LANGUAGE` (default `en`).
 
+### Language selection
+
+The endpoint accepts an optional `language` form field with an **ISO-639-1 code** (lowercase two letters: `en`, `de`, `fr`, `es`, ...) — the same format as OpenAI's transcription API. Omit it for auto-detection.
+
+| Model | `language` field |
+|---|---|
+| `qwen3-asr-0.6b` | ✅ forces the language (mapped internally to Qwen's naming); omit to auto-detect across ~52 languages |
+| `voxtral-mini` | ✅ required by the model; defaults to `VOXTRAL_LANGUAGE` (`en`) when omitted |
+| Parakeet variants | ignored — the model always auto-detects (25 European languages) |
+| `moonshine-v2` | ignored per-request — set `MOONSHINE_LANGUAGE` before startup instead |
+
 Example:
 
 ```bash
 curl -s http://localhost:5092/v1/audio/transcriptions \
-  -F file=@sample.wav -F model=qwen3-asr-0.6b | jq .text
+  -F file=@sample.wav -F model=qwen3-asr-0.6b -F language=de | jq .text
 ```
 
 ## 🙏 Acknowledgments
