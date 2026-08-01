@@ -225,6 +225,8 @@ Besides the Parakeet variants, the server registers additional models for CPU pe
 
 | `model` value | Backend | Notes |
 |---|---|---|
+| `canary-1b-v2` | onnx-asr (`istupakov/canary-1b-v2-onnx`, INT8) | NVIDIA Canary 1B v2, 25 languages; same ONNX runtime as Parakeet |
+| `canary-1b-flash` | onnx-asr (`istupakov/canary-1b-flash-onnx`, INT8) | NVIDIA Canary 1B Flash, en/de/es/fr |
 | `qwen3-asr-0.6b` | transformers (`Qwen/Qwen3-ASR-0.6B-hf`) | fp32 on CPU; requires `transformers>=5.13` |
 | `moonshine-v2` | `moonshine-voice` (ONNX) | Arch/language via `MOONSHINE_MODEL_ARCH` / `MOONSHINE_LANGUAGE` |
 | `voxtral-mini` | transformers (`mistralai/Voxtral-Mini-3B-2507`) | fp32 on CPU (~12 GB RAM); `VOXTRAL_DTYPE=bfloat16` halves RAM |
@@ -238,6 +240,7 @@ The endpoint accepts an optional `language` form field with an **ISO-639-1 code*
 
 | Model | `language` field |
 |---|---|
+| `canary-1b-v2` / `canary-1b-flash` | ✅ forces the language (must be a code the model knows, e.g. `de` → `<\|de\|>` token); omit for English |
 | `qwen3-asr-0.6b` | ✅ forces the language (mapped internally to Qwen's naming); omit to auto-detect across ~52 languages |
 | `voxtral-mini` | ✅ required by the model; defaults to `VOXTRAL_LANGUAGE` (`en`) when omitted |
 | Parakeet variants | ignored — the model always auto-detects (25 European languages) |

@@ -1,4 +1,4 @@
-onnx-asr[hub]>=0.10.0
+onnx-asr[hub]>=0.11.0  # 0.11 added Canary 1B Flash + Canary decoding fix
 waitress>=3.0.0
 flask>=3.0.0
 openai>=1.0.0

@@ -80,6 +80,20 @@ MODEL_CONFIGS = {
         "quantization": "fp16",
         "description": "FP16"
     },
+    "canary-1b-v2": {
+        "backend": "onnx_asr",
+        "hf_id": "nemo-canary-1b-v2",
+        "quantization": "int8",
+        "supports_language": True,
+        "description": "Canary 1B v2 INT8 (ONNX, 25 languages)"
+    },
+    "canary-1b-flash": {
+        "backend": "onnx_asr",
+        "hf_id": "istupakov/canary-1b-flash-onnx",
+        "quantization": "int8",
+        "supports_language": True,
+        "description": "Canary 1B Flash INT8 (ONNX, en/de/es/fr)"
+    },
     "qwen3-asr-0.6b": {
         "backend": "qwen3",
         "hf_id": "Qwen/Qwen3-ASR-0.6B-hf",
@@ -801,8 +815,12 @@ def transcribe_audio():
     # Get the appropriate model (with lazy loading)
     model_to_use = get_model(model_name)
 
-    # Only the PoC backends take a per-request language
-    forward_language = bool(language) and MODEL_CONFIGS[model_name].get("backend", "onnx_asr") != "onnx_asr"
+    # PoC backends take a per-request language; among the onnx_asr models
+    # only Canary does (supports_language) — Parakeet always auto-detects
+    _cfg = MODEL_CONFIGS[model_name]
+    forward_language = bool(language) and (
+        _cfg.get("backend", "onnx_asr") != "onnx_asr" or _cfg.get("supports_language", False)
+    )
     if language and not forward_language:
         print(f"⚠️ Model '{model_name}' auto-detects language; ignoring language='{language}'")
 
@@ -998,10 +1016,15 @@ def transcribe_audio():
                 result = model_to_use.recognize(chunk_path)
 
             if result and result.text:
-                start_time = result.timestamps[0] if result.timestamps else 0
+                # Canary (AED) results carry timestamps=None; normalize so the
+                # segment/word bookkeeping below works for every backend
+                chunk_timestamps = result.timestamps or []
+                chunk_tokens = result.tokens or []
+
+                start_time = chunk_timestamps[0] if chunk_timestamps else 0
                 end_time = (
-                    result.timestamps[-1]
-                    if len(result.timestamps) > 1
+                    chunk_timestamps[-1]
+                    if len(chunk_timestamps) > 1
                     else start_time + 0.1
                 )
 
@@ -1018,10 +1041,10 @@ def transcribe_audio():
                 progress_tracker[unique_id]["partial_text"] += cleaned_text + " "
 
                 for j, (token, timestamp) in enumerate(
-                    zip(result.tokens, result.timestamps)
+                    zip(chunk_tokens, chunk_timestamps)
                 ):
-                    if j < len(result.timestamps) - 1:
-                        word_end = result.timestamps[j + 1]
+                    if j < len(chunk_timestamps) - 1:
+                        word_end = chunk_timestamps[j + 1]
                     else:
                         word_end = end_time
 
